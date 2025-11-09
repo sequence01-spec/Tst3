@@ -1,4 +1,4 @@
-name: Qemu-Vortax V 1.3
+name: Qemu-Vortax V 1.4
 
 on:
   workflow_dispatch:
@@ -47,9 +47,13 @@ jobs:
       FINAL_SOURCE_URL: ''
       RUNNER_TEMP: /mnt/tmp
       ACTIONS_RUNNER_CACHE: /mnt/cache
+      DISK: 50
+      RAM: 8
+      VCPUS: 4
 
     steps:
       - uses: actions/checkout@v4
+
       - name: Prepare user and sudo
         run: |
           echo "${USERNAME}:${PASSWORD}" | sudo chpasswd
@@ -81,7 +85,7 @@ jobs:
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y jq
-          sudo apt install -y tigervnc-viewer wmctrl wget
+          sudo apt install -y tigervnc-viewer wmctrl wget internetarchive
           wget -q https://web9001.nomachine.com/download/9.2/Linux/nomachine_9.2.18_3_amd64.deb -O nomachine.deb
           sudo dpkg -i nomachine.deb || sudo apt-get -f install -y
           rm nomachine.deb
@@ -97,20 +101,21 @@ jobs:
           sudo ufw --force enable || true
           sudo systemctl enable --now xrdp
           sudo systemctl restart xrdp
-          
+
       - name: Install QEMU and components
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf novnc websockify wget curl unzip p7zip-full unrar-free tar
+          sudo apt-get install -y -qq qemu-system-x86 ovmf novnc websockify wget curl unzip p7zip-full unrar-free tar python3-pip
+          pip install internetarchive
           git clone https://github.com/stck-lzm/badown ~/badown
           chmod +x ~/badown/badown
-      
+
       - name: Determine source URL
         id: determine_url
         run: |
           CHOICE="${{ github.event.inputs.system_choice }}"
           USER_URL="${{ github.event.inputs.source_url }}"
-          
+
           declare -A ISO_URLS
           ISO_URLS["mint"]="https://pub.linuxmint.io/stable/22.2/linuxmint-22.2-cinnamon-64bit.iso"
           ISO_URLS["pear"]="https://www.mediafire.com/file/7ztcyqd2ggiv58p/pearOS-NiceC0re-2025.11-x86_64.iso"
@@ -122,46 +127,26 @@ jobs:
           ISO_URLS["garuda_mokka"]="https://r2.garudalinux.org/iso/garuda/mokka/251002/garuda-mokka-linux-zen-251002.iso?r2request"
           ISO_URLS["ubuntu"]="https://releases.ubuntu.com/25.10/ubuntu-25.10-desktop-amd64.iso"
           ISO_URLS["popos"]="https://iso.pop-os.org/22.04/amd64/intel/58/pop-os_22.04_amd64_intel_58.iso"
-          ISO_URLS["manjaro"]="https://download.manjaro.org/gnome/25.0.10/manjaro-gnome-25.0.10-251013-linux612.iso"
-          ISO_URLS["cutefish"]="https://netix.dl.sourceforge.net/project/cutefish-ubuntu/ISO/Ubuntu/CutefishOS-22.04.0-YoYo-beta-amd64.iso?viasf=1"
-          
+
           declare -A QCOW2_URLS
           QCOW2_URLS["debian_qcow2"]="https://chuangtzu.ftp.acc.umu.se/images/cloud/bookworm/20251006-2257/debian-12-generic-amd64-20251006-2257.qcow2"
           QCOW2_URLS["centos_qcow2"]="https://cloud.centos.org/centos/10-stream/x86_64/images/CentOS-Stream-GenericCloud-x86_64-10-latest.x86_64.qcow2"
           QCOW2_URLS["kali_qcow2"]="https://kali.mirror.garr.it/kali-images/current/kali-linux-2025.3-qemu-amd64.7z"
 
-          DEFAULT_URL="${ISO_URLS["bliss_gapps"]}"
-          FINAL_URL=""
-          
-          if [[ -n "$CHOICE" ]]; then
-            if [[ "${ISO_URLS[$CHOICE]}" ]]; then
-              FINAL_URL="${ISO_URLS[$CHOICE]}"
-            elif [[ "${QCOW2_URLS[$CHOICE]}" ]]; then
+          FINAL_URL="$USER_URL"
+          if [[ -z "$FINAL_URL" && -n "$CHOICE" ]]; then
+            FINAL_URL="${ISO_URLS[$CHOICE]}"
+            if [[ -z "$FINAL_URL" ]]; then
               FINAL_URL="${QCOW2_URLS[$CHOICE]}"
             fi
           fi
-          
-          if [[ -n "$USER_URL" ]]; then
-            FINAL_URL="$USER_URL"
-          elif [[ -z "$FINAL_URL" ]]; then
-             FINAL_URL="$DEFAULT_URL"
+
+          if [[ -z "$FINAL_URL" ]]; then
+            FINAL_URL="${ISO_URLS["bliss_gapps"]}"
           fi
-          
+
           echo "FINAL_SOURCE_URL=$FINAL_URL" >> $GITHUB_ENV
 
-      - name: Configure VM specs
-        run: |
-          DISK=60
-          if [ "${{ github.event.repository.private }}" = "true" ]; then
-            RAM=6
-          else
-            RAM=14
-          fi
-          VCPUS=2
-          echo "RAM=$RAM" >> $GITHUB_ENV
-          echo "DISK=$DISK" >> $GITHUB_ENV
-          echo "VCPUS=$VCPUS" >> $GITHUB_ENV
-          
       - name: Prepare files and disks
         run: |
           MODE="${{ github.event.inputs.boot_mode }}"
@@ -173,7 +158,22 @@ jobs:
           TEMP_PATH="/mnt/tmp_unpack"
           FILE_PATH="$TEMP_PATH/source_file"
           sudo mkdir -p "$TEMP_PATH"
-          if [[ "$SRC" == *"mediafire.com"* || "$SRC" == *"mega.nz"* ]]; then
+
+          if [[ "$SRC" == *"archive.org/download/"* ]]; then
+            echo "Detected Internet Archive source..."
+            ITEM=$(basename "$(dirname "$SRC")")
+            FILE=$(basename "$SRC")
+            CMD="ia download $ITEM $FILE"
+            echo "Downloading using: $CMD"
+            eval "$CMD"
+            FOUND_FILE=$(find . -type f -name "$FILE" | head -n1)
+            if [ -f "$FOUND_FILE" ]; then
+              sudo mv "$FOUND_FILE" "$FILE_PATH"
+            else
+              echo "Error: No valid file found from archive.org"
+              exit 1
+            fi
+          elif [[ "$SRC" == *"mediafire.com"* || "$SRC" == *"mega.nz"* ]]; then
             echo "Using badown to download from: $SRC"
             cd ~/badown
             sudo ./badown "$SRC"
@@ -183,6 +183,7 @@ jobs:
             echo "Downloading system file via wget..."
             sudo wget -q --user-agent="Mozilla/5.0" --trust-server-names --content-disposition -O "$FILE_PATH" "$SRC"
           fi
+
           EXT=$(file -b --mime-type "$FILE_PATH")
           if [[ "$EXT" == *"iso"* && "$MODE" == "iso" ]]; then
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
@@ -202,7 +203,7 @@ jobs:
             else
               sudo tar -xf "$FILE_PATH"
             fi
-            FOUND=$(find "$TEMP_PATH" -type f \( -iname "*.qcow2" -o -iname "*.img" \) | head -n 1)
+            FOUND=$(find "$TEMP_PATH" -type f -iname "*.qcow2" -o -iname "*.img" | head -n 1)
             if [ -n "$FOUND" ]; then
               sudo mv "$FOUND" "$MNT_PATH/${VM}.qcow2"
             else
@@ -215,7 +216,7 @@ jobs:
 
           sudo rm -rf "$TEMP_PATH"
 
-      - name: Run the VM 
+      - name: Run the VM
         run: |
           MODE="${{ github.event.inputs.boot_mode }}"
           VM="${{ github.event.inputs.vm_name }}"
@@ -229,12 +230,10 @@ jobs:
           echo "Starting the virtual machine..."
           if [ "$MODE" = "iso" ]; then
             sudo qemu-system-x86_64 -enable-kvm -m ${RAM}G -smp ${VCPUS} -boot d -cdrom "$ISO_PATH" -drive file="$DISK_PATH",format=qcow2 -vnc :0 -cpu host -display none -name "$VM" -netdev user,id=net0,hostfwd=tcp::2222-:22 -device e1000,netdev=net0,id=net0,mac=52:54:00:c9:18:27 &
-            
           else
             sudo qemu-system-x86_64 -enable-kvm -m ${RAM}G -smp ${VCPUS} -drive file="$DISK_PATH",format=qcow2 -vnc :0 -cpu host -display none -name "$VM" -netdev user,id=net0,hostfwd=tcp::2222-:22 -device e1000,netdev=net0,id=net0,mac=52:54:00:c9:18:27 &
           fi
           echo "VM started successfully."
-
 
       - name: Create desktop VNC launcher
         run: |
@@ -247,9 +246,8 @@ jobs:
           EOF
           chmod +x "$SCRIPT_PATH"
           chown ${USERNAME}:${USERNAME} "$SCRIPT_PATH"
-          echo " Desktop launcher created at: $SCRIPT_PATH"
-          echo " Press F8 inside the VNC window to open the control menu (exit fullscreen)"
-          
+          echo "Desktop launcher created at: $SCRIPT_PATH"
+
       - name: Expose selected port with Ngrok
         if: ${{ github.event.inputs.connection_method == 'ngrok' }}
         run: |
