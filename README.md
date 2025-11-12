@@ -1,6 +1,6 @@
 ---
 
-# Qemu-Vortax V1.4
+# Qemu-Vortax V1.5
 
 Run any operating system (ISO, QCOW2, or compressed archive) directly on **GitHub Actions** with full graphical access through **XFCE**, **RDP**, **VNC**, **NoMachine**, and **Tailscale**.
 
@@ -8,7 +8,7 @@ Run any operating system (ISO, QCOW2, or compressed archive) directly on **GitHu
 
 ## ⚙️ Overview
 
-**Qemu-Vortax V1.3** is an educational and experimental workflow that boots complete virtual machines inside GitHub Actions using QEMU + XFCE.  
+**Qemu-Vortax V1.5** is an educational and experimental workflow that boots complete virtual machines inside GitHub Actions using QEMU + XFCE.  
 You can run Linux distributions, Android builds, or pre-made cloud images (ISO/QCOW2) from any source.
 
 > 🧠 For educational use only.  
@@ -29,6 +29,7 @@ You can run Linux distributions, Android builds, or pre-made cloud images (ISO/Q
 - 🌐 Cross-device access (Windows, macOS, Linux, Android)  
 - 💾 Temporary QCOW2 storage for realistic disk simulation  
 - ⚡ Boots in under 4–5 minutes depending on image size  
+- 🔄 Fully integrates all previous releases (V1.3, V1.4) as legacy templates  
 
 ---
 
@@ -49,7 +50,7 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 
 ### 3. Run the workflow  
 1. Open the **Actions** tab.  
-2. Select **Qemu-Vortax V1.3**.  
+2. Select **Qemu-Vortax V1.5**.  
 3. Click **Run workflow** and fill the inputs.
 
 ---
@@ -63,8 +64,9 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 | `source_url` | Custom URL (MediaFire, Mega, direct) | `https://example.com/os.iso` |
 | `vm_name` | VM name | `test-linux` |
 | `runtime` | Session duration in minutes | `350` |
-| `connection_method` | `tillscale` or `ngrok` | `tailscale` |
+| `connection_method` | `tailscale` or `ngrok` | `tailscale` |
 | `connection_program` | `RDP`, `VNC`, `NoMachine` | `RDP` |
+| `bios_mode` | Firmware mode (`UEFI` or `BIOS`) | `UEFI` |
 
 > ⚠️ Do not include spaces in URLs.  
 > Match boot mode to file type.  
@@ -91,6 +93,9 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 | `debian_qcow2` | QCOW2 | Debian 12 Bookworm cloud image preconfigured for QEMU. | ![Debian](assets/debian_qcow2.png) |
 | `centos_qcow2` | QCOW2 | CentOS Stream 10 GenericCloud image for stable enterprise environments. | ![CentOS](assets/centos_qcow2.png) |
 | `kali_qcow2` | QCOW2 | Kali Linux 2025.3 QEMU-ready build for penetration testing. | ![Kali](assets/kali.png) |
+
+> All previous releases (V1.3, V1.4) are included as legacy templates.
+
 ---
 
 ## 🖥️ Connection Details
@@ -101,7 +106,8 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 | VNC | `ip:5900` | VNC Viewer / Remmina |
 | NoMachine | auto | Fast remote desktop |
 | Tailscale | secure | Private VPN-style access |
-| Ngrok | secure | Private tannal forward access |
+| Ngrok | secure | Private tunnel forward access |
+
 > When connected through RDP or NoMachine, open **Connect_VNC.sh** inside the desktop to view the QEMU display.
 
 ---
@@ -118,7 +124,7 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 ## 🧠 Credits
 
 Developed by **Mohamed Ahmed Saad**  
-Project: **Qemu-Vortax V1.4**  
+Project: **Qemu-Vortax V1.5**  
 Goal: Simplify and accelerate virtual machine testing in the cloud.
 
 ---
