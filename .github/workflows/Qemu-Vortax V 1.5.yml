@@ -1,4 +1,4 @@
-name: Qemu-Vortax V 1.4
+name: Qemu-Vortax V 1.5
 
 on:
   workflow_dispatch:
@@ -31,6 +31,10 @@ on:
         description: 'Select program (RDP, VNC, NoMachine)'
         required: true
         default: 'RDP'
+      bios_mode:
+        description: 'Choose firmware mode: UEFI or BIOS (default UEFI)'
+        required: true
+        default: 'BIOS'
 
 permissions:
   contents: read
@@ -47,9 +51,6 @@ jobs:
       FINAL_SOURCE_URL: ''
       RUNNER_TEMP: /mnt/tmp
       ACTIONS_RUNNER_CACHE: /mnt/cache
-      DISK: 50
-      RAM: 8
-      VCPUS: 4
 
     steps:
       - uses: actions/checkout@v4
@@ -81,11 +82,10 @@ jobs:
             exit 1
           fi
 
-      - name: Install XFCE + RDP + NoMachine + SSH/X
+      - name: Install XFCE + RDP + NoMachine
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y jq
-          sudo apt install -y tigervnc-viewer wmctrl wget internetarchive
+          sudo apt-get install -y jq tigervnc-viewer wmctrl wget internetarchive
           wget -q https://web9001.nomachine.com/download/9.2/Linux/nomachine_9.2.18_3_amd64.deb -O nomachine.deb
           sudo dpkg -i nomachine.deb || sudo apt-get -f install -y
           rm nomachine.deb
@@ -102,7 +102,7 @@ jobs:
           sudo systemctl enable --now xrdp
           sudo systemctl restart xrdp
 
-      - name: Install QEMU and components
+      - name: Install QEMU, OVMF, and components
         run: |
           sudo apt-get update -qq
           sudo apt-get install -y -qq qemu-system-x86 ovmf novnc websockify wget curl unzip p7zip-full unrar-free tar python3-pip
@@ -147,6 +147,19 @@ jobs:
 
           echo "FINAL_SOURCE_URL=$FINAL_URL" >> $GITHUB_ENV
 
+      - name: Configure VM specs
+        run: |
+          DISK=60
+          if [ "${{ github.event.repository.private }}" = "true" ]; then
+            RAM=6
+          else
+            RAM=14
+          fi
+          VCPUS=2
+          echo "RAM=$RAM" >> $GITHUB_ENV
+          echo "DISK=$DISK" >> $GITHUB_ENV
+          echo "VCPUS=$VCPUS" >> $GITHUB_ENV
+          
       - name: Prepare files and disks
         run: |
           MODE="${{ github.event.inputs.boot_mode }}"
@@ -219,6 +232,7 @@ jobs:
       - name: Run the VM
         run: |
           MODE="${{ github.event.inputs.boot_mode }}"
+          BIOS_MODE="${{ github.event.inputs.bios_mode }}"
           VM="${{ github.event.inputs.vm_name }}"
           VCPUS="${{ env.VCPUS }}"
           RAM="${{ env.RAM }}"
@@ -226,12 +240,88 @@ jobs:
           MNT_PATH="/mnt"
           ISO_PATH="$HOME_PATH/${VM}.iso"
           DISK_PATH="$MNT_PATH/${VM}.qcow2"
+          
+          wget -q https://gitlab.com/MR.English2008/qemu-pre-build-ovfm.fd-files/-/raw/main/OVMF_CODE.fd -O OVMF_CODE.fd
+          wget -q https://gitlab.com/MR.English2008/qemu-pre-build-ovfm.fd-files/-/raw/main/OVMF_VARS.fd -O OVMF_VARS.fd
+          CODE_PATH=./OVMF_CODE.fd
+          VARS_PATH=./OVMF_VARS.fd
+          echo "downloaded from gitlab new links"
 
-          echo "Starting the virtual machine..."
-          if [ "$MODE" = "iso" ]; then
-            sudo qemu-system-x86_64 -enable-kvm -m ${RAM}G -smp ${VCPUS} -boot d -cdrom "$ISO_PATH" -drive file="$DISK_PATH",format=qcow2 -vnc :0 -cpu host -display none -name "$VM" -netdev user,id=net0,hostfwd=tcp::2222-:22 -device e1000,netdev=net0,id=net0,mac=52:54:00:c9:18:27 &
+          if [ ! -f "$DISK_PATH" ]; then
+            sudo qemu-img create -f qcow2 "$DISK_PATH" "${DISK}G" || true
+          fi
+
+          if [ "$BIOS_MODE" = "UEFI" ]; then
+            if [ -f "$ISO_PATH" ]; then
+              sudo qemu-system-x86_64 \
+                -enable-kvm \
+                -cpu host \
+                -smp ${VCPUS} \
+                -m ${RAM}G \
+                -boot d \
+                -cdrom "$ISO_PATH" \
+                -drive if=none,id=hd0,file="$DISK_PATH",format=qcow2 \
+                -device virtio-blk-pci,drive=hd0 \
+                -drive if=pflash,format=raw,readonly=on,file="$CODE_PATH" \
+                -drive if=pflash,format=raw,file="$VARS_PATH" \
+                -vnc :0 \
+                -display none \
+                -netdev user,id=net0 \
+                -device e1000,netdev=net0 \
+                -device usb-ehci,id=ehci \
+                -device usb-tablet,bus=ehci.0 \
+                -name "$VM" &
+            else
+              sudo qemu-system-x86_64 \
+                -enable-kvm \
+                -cpu host \
+                -smp ${VCPUS} \
+                -m ${RAM}G \
+                -hda "$DISK_PATH" \
+                -drive if=pflash,format=raw,readonly=on,file="$CODE_PATH" \
+                -drive if=pflash,format=raw,file="$VARS_PATH" \
+                -boot c \
+                -vnc :0 \
+                -display none \
+                -netdev user,id=net0 \
+                -device e1000,netdev=net0 \
+                -device usb-ehci,id=ehci \
+                -device usb-tablet,bus=ehci.0 \
+                -name "$VM" &
+            fi
           else
-            sudo qemu-system-x86_64 -enable-kvm -m ${RAM}G -smp ${VCPUS} -drive file="$DISK_PATH",format=qcow2 -vnc :0 -cpu host -display none -name "$VM" -netdev user,id=net0,hostfwd=tcp::2222-:22 -device e1000,netdev=net0,id=net0,mac=52:54:00:c9:18:27 &
+            if [ -f "$ISO_PATH" ]; then
+              sudo qemu-system-x86_64 \
+                -enable-kvm \
+                -cpu host \
+                -smp ${VCPUS} \
+                -m ${RAM}G \
+                -boot d \
+                -cdrom "$ISO_PATH" \
+                -hda "$DISK_PATH" \
+                -vnc :0 \
+                -display none \
+                -netdev user,id=net0 \
+                -device e1000,netdev=net0 \
+                -device usb-ehci,id=ehci \
+                -device usb-tablet,bus=ehci.0 \
+                -name "$VM" &
+            else
+              sudo qemu-system-x86_64 \
+                -enable-kvm \
+                -cpu host \
+                -smp ${VCPUS} \
+                -m ${RAM}G \
+                -hda "$DISK_PATH" \
+                -boot c \
+                -vnc :0 \
+                -display none \
+                -netdev user,id=net0 \
+                -device e1000,netdev=net0 \
+                -device usb-ehci,id=ehci \
+                -device usb-tablet,bus=ehci.0 \
+                -name "$VM" &
+            fi
           fi
           echo "VM started successfully."
 
