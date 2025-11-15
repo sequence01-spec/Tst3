@@ -359,4 +359,3 @@ jobs:
           echo "Keeping the session alive for ${RUNTIME} minutes..."
           sleep $((RUNTIME * 60))
           echo "Session ended after ${RUNTIME} minutes."
-```0
