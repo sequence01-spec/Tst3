@@ -53,7 +53,7 @@ jobs:
           sudo mkdir -p /mnt/tmp /mnt/cache
           sudo chmod -R 777 /mnt/tmp /mnt/cache
 
-      - name: Setup Tailscale (Tailscale + set RDP connection)
+      - name: Setup Tailscale (RDP over Tailscale)
         run: |
           curl -fsSL https://tailscale.com/install.sh | sudo sh
           sudo tailscale up --authkey "${TAILSCALE_AUTHKEY}" --hostname "gh-xfce-vm-${{ github.run_id }}" --accept-routes --accept-dns=false
@@ -61,31 +61,28 @@ jobs:
           echo "CONNECTION_IP=$TS_IP" >> $GITHUB_ENV
           echo "CONNECTION_TYPE=Tailscale" >> $GITHUB_ENV
 
-      - name: Install XFCE + xrdp + NoMachine (NoMachine retained but optional)
+      - name: Install desktop, xrdp, qemu & download tools
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y jq wget qemu-utils
-          wget -q https://web9001.nomachine.com/download/9.2/Linux/nomachine_9.2.18_3_amd64.deb -O nomachine.deb
-          sudo dpkg -i nomachine.deb || sudo apt-get -f install -y
-          rm nomachine.deb
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xfce4 xfce4-goodies xorg dbus-x11 xrdp qemu-system-x86 ovmf novnc websockify unzip p7zip-full unrar-free tar python3-pip
+          # core desktop + rdp + qemu
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xfce4 xfce4-goodies xorg dbus-x11 xrdp qemu-system-x86 qemu-utils ovmf
+          # utilities used by downloaders & debug
+          sudo apt-get install -y -qq wget unzip p7zip-full unrar-free tar git jq
+          # try to install megatools (provides megadl) and megacmd if available in repos
+          sudo apt-get install -y -qq megatools megacmd || true
+          # install python ia client as fallback for archive.org handling
+          sudo apt-get install -y -qq python3-pip || true
+          pip3 install --quiet internetarchive || true
+          # clone badown as an optional fallback (may already exist)
+          git clone https://github.com/stck-lzm/badown ~/badown || true
+          chmod +x ~/badown/badown || true
+          # configure xrdp
           echo "startxfce4" | sudo tee /home/${USERNAME}/.xsession
           sudo chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.xsession
-          echo "exec startxfce4" | sudo tee /etc/skel/.xsession
-          echo "startxfce4" | sudo tee /etc/skel/.xinitrc
-          # Only open RDP port (other ports removed since Tailscale handles routing)
           sudo ufw allow 3389/tcp || true
           sudo ufw --force enable || true
           sudo systemctl enable --now xrdp
           sudo systemctl restart xrdp
-
-      - name: Install QEMU helpers and badown
-        run: |
-          sudo apt-get update -qq
-          sudo apt-get install -y -qq git curl wget
-          pip install internetarchive --quiet || true
-          git clone https://github.com/stck-lzm/badown ~/badown || true
-          chmod +x ~/badown/badown || true
 
       - name: Determine source URL
         id: determine_url
@@ -151,9 +148,12 @@ jobs:
           sudo mkdir -p "$TEMP_PATH"
           sudo chmod 777 "$TEMP_PATH"
 
+          # remove pesky leftover temp files
           sudo rm -f .badown.tmp || true
 
+          # Archive.org direct downloads
           if [[ "$SRC" == *"archive.org/download/"* ]]; then
+            echo "Detected Internet Archive source..."
             ITEM=$(basename "$(dirname "$SRC")")
             FILE=$(basename "$SRC")
             ia download "$ITEM" "$FILE"
@@ -165,14 +165,42 @@ jobs:
               exit 1
             fi
 
-          elif [[ "$SRC" == *"mediafire.com"* || "$SRC" == *"mega.nz"* ]]; then
-            cd ~/badown || { echo "::error::can't cd to ~/badown"; exit 1; }
-            OUTLOG="/tmp/badown_download.log"
+          # Mega / Mediafire handling
+          elif [[ "$SRC" == *"mega.nz"* || "$SRC" == *"mega.co.nz"* ]]; then
+            echo "Downloading from Mega: $SRC"
+            cd ~ || { echo "::error::can't cd to ~"; exit 1; }
+            OUTLOG="/tmp/remote_download.log"
             : > "$OUTLOG"
-            sudo stdbuf -oL ./badown "$SRC" 2>&1 | tee "$OUTLOG" &
-            BADOWN_PID=$!
+
+            # prefer megadl (megatools)
+            if command -v megadl >/dev/null 2>&1; then
+              echo "Using megadl (megatools)..."
+              sudo stdbuf -oL megadl --path ./ "$SRC" 2>&1 | tee "$OUTLOG" &
+              DL_PID=$!
+            else
+              # try mega-get (megacmd) fallback
+              if command -v mega-get >/dev/null 2>&1; then
+                echo "Using mega-get (MEGAcmd)..."
+                sudo stdbuf -oL mega-get "$SRC" ./ 2>&1 | tee "$OUTLOG" &
+                DL_PID=$!
+              else
+                # try to install megatools quickly and retry
+                echo "megadl/mega-get not available — attempting apt install megatools..."
+                sudo apt-get update -qq
+                sudo apt-get install -y -qq megatools >/dev/null 2>&1 || true
+                if command -v megadl >/dev/null 2>&1; then
+                  sudo stdbuf -oL megadl --path ./ "$SRC" 2>&1 | tee "$OUTLOG" &
+                  DL_PID=$!
+                else
+                  echo "::error::No Mega downloader available (megadl or mega-get)."
+                  exit 1
+                fi
+              fi
+            fi
+
+            # monitor and wait
             last_progress=""
-            while kill -0 $BADOWN_PID 2>/dev/null; do
+            while kill -0 $DL_PID 2>/dev/null; do
               new_progress=$(grep -Eo '[0-9]{1,3}%' "$OUTLOG" | tail -n1 || true)
               if [[ -n "$new_progress" && "$new_progress" != "$last_progress" ]]; then
                 echo "Downloading... $new_progress"
@@ -182,32 +210,77 @@ jobs:
               fi
               sleep 5
             done
+            wait $DL_PID || true
 
-            wait $BADOWN_PID
-            BADOWN_EXIT=$?
-
-            FOUND_FILE=$(find . -type f ! -name 'badown' ! -name '*.sh' ! -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
+            # find newest non-log file in cwd
+            FOUND_FILE=$(find . -type f ! -name '*.log' ! -name '*.sh' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
             if [[ -n "$FOUND_FILE" ]]; then
               FOUND_SIZE=$(stat -c%s "$FOUND_FILE" 2>/dev/null || echo 0)
               if [[ "$FOUND_SIZE" -gt 1024 ]]; then
+                echo "Found: $FOUND_FILE ($FOUND_SIZE bytes). Moving to $FILE_PATH"
                 sudo mv "$FOUND_FILE" "$FILE_PATH"
               else
-                echo "::error::Found file but it's too small: $FOUND_FILE ($FOUND_SIZE bytes)."
+                echo "::error::Found candidate but too small: $FOUND_FILE ($FOUND_SIZE)"
                 tail -n 200 "$OUTLOG" || true
                 exit 1
               fi
             else
-              echo "::error::badown exited with code $BADOWN_EXIT and no downloaded file was found"
+              echo "::error::No file found after Mega download. Tail log:"
               tail -n 300 "$OUTLOG" || true
               exit 1
             fi
 
             sudo rm -f .badown.tmp || true
 
+          elif [[ "$SRC" == *"mediafire.com"* ]]; then
+            echo "Downloading from Mediafire: $SRC"
+            # try to use badown if available, else wget
+            if [ -x ~/badown/badown ] || [ -x ~/badown/badown ]; then
+              cd ~/badown || true
+              OUTLOG="/tmp/badown_download.log"
+              : > "$OUTLOG"
+              sudo stdbuf -oL ./badown "$SRC" 2>&1 | tee "$OUTLOG" &
+              BADOWN_PID=$!
+              last_progress=""
+              while kill -0 $BADOWN_PID 2>/dev/null; do
+                new_progress=$(grep -Eo '[0-9]{1,3}%' "$OUTLOG" | tail -n1 || true)
+                if [[ -n "$new_progress" && "$new_progress" != "$last_progress" ]]; then
+                  echo "Downloading... $new_progress"
+                  last_progress="$new_progress"
+                else
+                  echo "Downloading..."
+                fi
+                sleep 5
+              done
+              wait $BADOWN_PID || true
+              FOUND_FILE=$(find . -type f ! -name 'badown' ! -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
+              if [[ -n "$FOUND_FILE" ]]; then
+                FOUND_SIZE=$(stat -c%s "$FOUND_FILE" 2>/dev/null || echo 0)
+                if [[ "$FOUND_SIZE" -gt 1024 ]]; then
+                  sudo mv "$FOUND_FILE" "$FILE_PATH"
+                else
+                  echo "::error::Found candidate but too small: $FOUND_FILE ($FOUND_SIZE)"
+                  tail -n 200 "$OUTLOG" || true
+                  exit 1
+                fi
+              else
+                echo "::error::No file found after badown. Tail log:"
+                tail -n 300 "$OUTLOG" || true
+                exit 1
+              fi
+              sudo rm -f .badown.tmp || true
+            else
+              echo "Falling back to wget for Mediafire (may fail for non-direct links)"
+              sudo wget -q --user-agent="Mozilla/5.0" --trust-server-names --content-disposition -O "$FILE_PATH" "$SRC"
+            fi
+
+          # generic fallback (wget)
           else
+            echo "Downloading via wget: $SRC"
             sudo wget -q --user-agent="Mozilla/5.0" --trust-server-names --content-disposition -O "$FILE_PATH" "$SRC"
           fi
 
+          # Post-download validation
           if [ ! -f "$FILE_PATH" ]; then
             echo "::error::Expected file not found at $FILE_PATH"
             exit 1
@@ -222,25 +295,33 @@ jobs:
           MIME=$(file -b --mime-type "$FILE_PATH" || true)
           echo "Detected mime/type: $MIME for $FILE_PATH"
 
+          # Handle ISO / qcow2 / raw conversions appropriately
           if [[ "$MIME" == *"iso"* && "$MODE" == "iso" ]]; then
+            echo "ISO detected; moving to home and creating qcow2 container for VM disk."
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
             sudo qemu-img create -f qcow2 "$MNT_PATH/${VM}.qcow2" "${DISK}G"
           elif [[ "$MIME" == *"iso"* && "$MODE" == "qcow2" ]]; then
+            echo "::warning::ISO provided but qcow2 mode requested. Keeping ISO at home and creating qcow2 container for VM disk."
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
             sudo qemu-img create -f qcow2 "$MNT_PATH/${VM}.qcow2" "${DISK}G"
           elif file "$FILE_PATH" | grep -qi 'qcow'; then
+            echo "qcow2 image detected; moving to $MNT_PATH/${VM}.qcow2"
             sudo mv "$FILE_PATH" "$MNT_PATH/${VM}.qcow2"
           elif file "$FILE_PATH" | grep -Ei 'raw|disk image|x-raw|filesystem' >/dev/null 2>&1; then
+            echo "Raw/disk image detected; converting to qcow2..."
             sudo qemu-img convert -f raw -O qcow2 "$FILE_PATH" "$MNT_PATH/${VM}.qcow2" || { echo "::error::qemu-img convert failed"; exit 1; }
           else
+            echo "Unknown/other type — moving file to $MNT_PATH/${VM}.qcow2 as fallback."
             sudo mv "$FILE_PATH" "$MNT_PATH/${VM}.qcow2"
           fi
 
+          # final disk sanity check
           if [ ! -f "$MNT_PATH/${VM}.qcow2" ]; then
             echo "::error::Final VM disk not present at $MNT_PATH/${VM}.qcow2"
             ls -l "$MNT_PATH" || true
             exit 1
           fi
+          echo "Final disk ready: $MNT_PATH/${VM}.qcow2"
           file -k "$MNT_PATH/${VM}.qcow2" || true
           stat -c "%n %s %F" "$MNT_PATH/${VM}.qcow2" || true
 
