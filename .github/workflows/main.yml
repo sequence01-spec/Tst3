@@ -188,6 +188,52 @@ jobs:
             fi
           elif [[ "$SRC" == *"mediafire.com"* || "$SRC" == *"mega.nz"* ]]; then
             echo "Using badown to download from: $SRC"
+            cd ~/badown || exit 1
+            OUTLOG="/tmp/badown_download.log"
+            : > "$OUTLOG"
+
+            # Run badown with line buffering and tee its output to a logfile.
+            # stdbuf -oL forces line buffering so we can grep progress in real time.
+            sudo stdbuf -oL ./badown "$SRC" 2>&1 | tee "$OUTLOG" &
+            BADOWN_PID=$!
+
+            last_progress=""
+            while kill -0 $BADOWN_PID 2>/dev/null; do
+              new_progress=$(grep -Eo '[0-9]{1,3}%' "$OUTLOG" | tail -n1 || true)
+              if [[ -n "$new_progress" && "$new_progress" != "$last_progress" ]]; then
+                echo "Downloading... $new_progress"
+                last_progress="$new_progress"
+              else
+                echo "Downloading..."
+              fi
+              sleep 5
+            done
+
+            # Wait for process to fully exit and capture exit status
+            wait $BADOWN_PID
+            BADOWN_EXIT=$?
+            if [ $BADOWN_EXIT -ne 0 ]; then
+              echo "::error::badown exited with status $BADOWN_EXIT"
+              # show last lines of log for debugging
+              tail -n 50 "$OUTLOG" || true
+              exit 1
+            fi
+
+            # Find the most-recent regular file in ~/badown (ignore the badown script/log)
+            DOWNLOADED=$(find . -maxdepth 1 -type f ! -name 'badown' ! -name '*.sh' ! -name '*.log' -printf '%T@ %p\n' | sort -n | tail -n1 | cut -d' ' -f2- || true)
+            if [[ -z "$DOWNLOADED" ]]; then
+              # fallback to ls -t if find returned nothing
+              DOWNLOADED=$(ls -1t | grep -v -E 'badown|\.sh|\.log' | head -n1 || true)
+            fi
+
+            if [[ -z "$DOWNLOADED" ]]; then
+              echo "::error::No downloaded file found in ~/badown after badown finished"
+              tail -n 100 "$OUTLOG" || true
+              exit 1
+            fi
+
+            sudo mv "$DOWNLOADED" "$FILE_PATH"
+            echo "Using badown to download from: $SRC"
             cd ~/badown
             (
               sudo ./badown "$SRC" 2>/dev/null | while IFS= read -r line; do
