@@ -1,4 +1,4 @@
-name: Qemu-Vortax V 2.0
+name: Qemu-Vortax V 2.1
 
 on:
   workflow_dispatch:
@@ -89,7 +89,7 @@ jobs:
           wget -q https://web9001.nomachine.com/download/9.2/Linux/nomachine_9.2.18_3_amd64.deb -O nomachine.deb
           sudo dpkg -i nomachine.deb || sudo apt-get -f install -y
           rm nomachine.deb
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xfce4 xfce4-goodies xorg dbus-x11 xrdp
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xfce4 xfce4-goodies xorg dbus-x11 xrdp qemu-utils
           echo "startxfce4" | sudo tee /home/${USERNAME}/.xsession
           sudo chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.xsession
           echo "exec startxfce4" | sudo tee /etc/skel/.xsession
@@ -162,6 +162,7 @@ jobs:
           
       - name: Prepare files and disks
         run: |
+          set -euo pipefail
           MODE="${{ github.event.inputs.boot_mode }}"
           SRC="${{ env.FINAL_SOURCE_URL }}"
           VM="${{ github.event.inputs.vm_name }}"
@@ -171,7 +172,9 @@ jobs:
           TEMP_PATH="/mnt/tmp_unpack"
           FILE_PATH="$TEMP_PATH/source_file"
           sudo mkdir -p "$TEMP_PATH"
+          sudo chmod 777 "$TEMP_PATH"
 
+          # Handle Internet Archive direct downloads
           if [[ "$SRC" == *"archive.org/download/"* ]]; then
             echo "Detected Internet Archive source..."
             ITEM=$(basename "$(dirname "$SRC")")
@@ -183,17 +186,19 @@ jobs:
             if [ -f "$FOUND_FILE" ]; then
               sudo mv "$FOUND_FILE" "$FILE_PATH"
             else
-              echo "Error: No valid file found from archive.org"
+              echo "::error::No valid file found from archive.org"
               exit 1
             fi
+
+          # Use robust badown runner for mediafire/mega
           elif [[ "$SRC" == *"mediafire.com"* || "$SRC" == *"mega.nz"* ]]; then
             echo "Using badown to download from: $SRC"
-            cd ~/badown || exit 1
+            cd ~/badown || { echo "::error::can't cd to ~/badown"; exit 1; }
+
             OUTLOG="/tmp/badown_download.log"
             : > "$OUTLOG"
 
-            # Run badown with line buffering and tee its output to a logfile.
-            # stdbuf -oL forces line buffering so we can grep progress in real time.
+            # Run badown with line buffering and tee to a logfile
             sudo stdbuf -oL ./badown "$SRC" 2>&1 | tee "$OUTLOG" &
             BADOWN_PID=$!
 
@@ -209,84 +214,93 @@ jobs:
               sleep 5
             done
 
-            # Wait for process to fully exit and capture exit status
             wait $BADOWN_PID
             BADOWN_EXIT=$?
             if [ $BADOWN_EXIT -ne 0 ]; then
               echo "::error::badown exited with status $BADOWN_EXIT"
-              # show last lines of log for debugging
-              tail -n 50 "$OUTLOG" || true
+              tail -n 200 "$OUTLOG" || true
               exit 1
             fi
 
-            # Find the most-recent regular file in ~/badown (ignore the badown script/log)
-            DOWNLOADED=$(find . -maxdepth 1 -type f ! -name 'badown' ! -name '*.sh' ! -name '*.log' -printf '%T@ %p\n' | sort -n | tail -n1 | cut -d' ' -f2- || true)
+            # Find most recent downloaded file anywhere under ~/badown
+            DOWNLOADED=$(find . -type f ! -name 'badown' ! -name '*.sh' ! -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
             if [[ -z "$DOWNLOADED" ]]; then
-              # fallback to ls -t if find returned nothing
-              DOWNLOADED=$(ls -1t | grep -v -E 'badown|\.sh|\.log' | head -n1 || true)
+              DOWNLOADED=$(ls -1t 2>/dev/null | grep -v -E 'badown|\.sh|\.log' | head -n1 || true)
             fi
 
             if [[ -z "$DOWNLOADED" ]]; then
               echo "::error::No downloaded file found in ~/badown after badown finished"
-              tail -n 100 "$OUTLOG" || true
+              tail -n 300 "$OUTLOG" || true
               exit 1
             fi
 
+            echo "Found downloaded file: $DOWNLOADED (moving to $FILE_PATH)"
             sudo mv "$DOWNLOADED" "$FILE_PATH"
-            echo "Using badown to download from: $SRC"
-            cd ~/badown
-            (
-              sudo ./badown "$SRC" 2>/dev/null | while IFS= read -r line; do
-                echo "$line" > /dev/null
-              done &
-              pid=$!
-              while kill -0 $pid 2>/dev/null; do
-                echo "Downloading..."
-                sleep 10
-              done
-            )
-            DOWNLOADED=$(ls -t | head -n1)
-            sudo mv "$DOWNLOADED" "$FILE_PATH"
-            
+
+          # Fallback to wget for other sources
           else
             echo "Downloading system file via wget..."
             sudo wget -q --user-agent="Mozilla/5.0" --trust-server-names --content-disposition -O "$FILE_PATH" "$SRC"
           fi
 
-          EXT=$(file -b --mime-type "$FILE_PATH")
-          if [[ "$EXT" == *"iso"* && "$MODE" == "iso" ]]; then
+          # Post-download validation
+          if [ ! -f "$FILE_PATH" ]; then
+            echo "::error::Expected file not found at $FILE_PATH"
+            exit 1
+          fi
+          FILESIZE=$(stat -c%s "$FILE_PATH" 2>/dev/null || echo 0)
+          if [ "$FILESIZE" -le 1024 ]; then
+            echo "::error::Downloaded file looks too small ($FILESIZE bytes)."
+            file "$FILE_PATH" || true
+            exit 1
+          fi
+
+          MIME=$(file -b --mime-type "$FILE_PATH" || true)
+          echo "Detected mime/type: $MIME for $FILE_PATH"
+
+          # If ISO found and user chose ISO mode -> keep iso and create qcow2 disk
+          if [[ "$MIME" == *"iso"* && "$MODE" == "iso" ]]; then
+            echo "ISO detected; moving to home and creating qcow2 container for VM disk."
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
             sudo qemu-img create -f qcow2 "$MNT_PATH/${VM}.qcow2" "${DISK}G"
-          elif [[ "$EXT" == *"iso"* && "$MODE" == "qcow2" ]]; then
-            echo "::warning title=ISO Detected::User chose qcow2 mode but ISO provided. Proceeding with ISO."
+
+          # If ISO but user requested qcow2: keep the ISO and create qcow2 disk (same behavior as before)
+          elif [[ "$MIME" == *"iso"* && "$MODE" == "qcow2" ]]; then
+            echo "::warning::ISO provided but qcow2 mode requested. Keeping ISO at home and creating qcow2 container for VM disk."
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
             sudo qemu-img create -f qcow2 "$MNT_PATH/${VM}.qcow2" "${DISK}G"
-          elif [[ "$EXT" == *"zip"* || "$EXT" == *"7z"* || "$EXT" == *"rar"* || "$EXT" == *"tar"* || "$EXT" == *"gzip"* ]]; then
-            cd "$TEMP_PATH"
-            if [[ "$EXT" == *"zip"* ]]; then
-              sudo unzip -q "$FILE_PATH" -d "$TEMP_PATH"
-            elif [[ "$EXT" == *"7z"* ]]; then
-              sudo 7z x -y "$FILE_PATH" > /dev/null
-            elif [[ "$EXT" == *"rar"* ]]; then
-              sudo unrar x -inul "$FILE_PATH"
-            else
-              sudo tar -xf "$FILE_PATH"
-            fi
-            FOUND=$(find "$TEMP_PATH" -type f -iname "*.qcow2" -o -iname "*.img" | head -n 1)
-            if [ -n "$FOUND" ]; then
-              sudo mv "$FOUND" "$MNT_PATH/${VM}.qcow2"
-            else
-              echo "::error::No QCOW2 or IMG found inside archive."
-              exit 1
-            fi
+
+          # If qcow2 already, move into place
+          elif file "$FILE_PATH" | grep -qi 'qcow'; then
+            echo "qcow2 image detected; moving to $MNT_PATH/${VM}.qcow2"
+            sudo mv "$FILE_PATH" "$MNT_PATH/${VM}.qcow2"
+
+          # If looks like raw/disk image -> convert to qcow2
+          elif file "$FILE_PATH" | grep -Ei 'raw|disk image|x-raw|filesystem' >/dev/null 2>&1; then
+            echo "Raw/disk image detected; converting to qcow2..."
+            sudo qemu-img convert -f raw -O qcow2 "$FILE_PATH" "$MNT_PATH/${VM}.qcow2" || { echo "::error::qemu-img convert failed"; exit 1; }
+
+          # Otherwise, assume it's a qcow2 target (move as fallback) and let validations detect issues
           else
+            echo "Unknown type, moving file to $MNT_PATH/${VM}.qcow2 and will validate."
             sudo mv "$FILE_PATH" "$MNT_PATH/${VM}.qcow2"
           fi
 
-          sudo rm -rf "$TEMP_PATH"
+          # Final sanity check for disk
+          if [ ! -f "$MNT_PATH/${VM}.qcow2" ]; then
+            echo "::error::Final VM disk not present at $MNT_PATH/${VM}.qcow2"
+            ls -l "$MNT_PATH" || true
+            exit 1
+          fi
+          echo "Final disk ready: $MNT_PATH/${VM}.qcow2"
+          file -k "$MNT_PATH/${VM}.qcow2" || true
+          stat -c "%n %s %F" "$MNT_PATH/${VM}.qcow2" || true
+
+          sudo rm -rf "$TEMP_PATH" || true
 
       - name: Run the VM
         run: |
+          set -euo pipefail
           MODE="${{ github.event.inputs.boot_mode }}"
           BIOS_MODE="${{ github.event.inputs.bios_mode }}"
           VM="${{ github.event.inputs.vm_name }}"
@@ -296,7 +310,7 @@ jobs:
           MNT_PATH="/mnt"
           ISO_PATH="$HOME_PATH/${VM}.iso"
           DISK_PATH="$MNT_PATH/${VM}.qcow2"
-          
+
           wget -q https://gitlab.com/MR.English2008/qemu-pre-build-ovfm.fd-files/-/raw/main/OVMF_CODE.fd -O OVMF_CODE.fd
           wget -q https://gitlab.com/MR.English2008/qemu-pre-build-ovfm.fd-files/-/raw/main/OVMF_VARS.fd -O OVMF_VARS.fd
           CODE_PATH=./OVMF_CODE.fd
@@ -307,6 +321,7 @@ jobs:
             sudo qemu-img create -f qcow2 "$DISK_PATH" "${DISK}G" || true
           fi
 
+          # UEFI branch
           if [ "$BIOS_MODE" = "UEFI" ]; then
             if [ -f "$ISO_PATH" ]; then
               sudo qemu-system-x86_64 \
@@ -333,7 +348,8 @@ jobs:
                 -cpu host \
                 -smp ${VCPUS} \
                 -m ${RAM}G \
-                -hda "$DISK_PATH" \
+                -drive if=none,id=hd0,file="$DISK_PATH",format=qcow2 \
+                -device virtio-blk-pci,drive=hd0 \
                 -drive if=pflash,format=raw,readonly=on,file="$CODE_PATH" \
                 -drive if=pflash,format=raw,file="$VARS_PATH" \
                 -boot c \
@@ -345,6 +361,8 @@ jobs:
                 -device usb-tablet,bus=ehci.0 \
                 -name "$VM" &
             fi
+
+          # BIOS branch
           else
             if [ -f "$ISO_PATH" ]; then
               sudo qemu-system-x86_64 \
@@ -354,7 +372,8 @@ jobs:
                 -m ${RAM}G \
                 -boot d \
                 -cdrom "$ISO_PATH" \
-                -hda "$DISK_PATH" \
+                -drive if=none,id=hd0,file="$DISK_PATH",format=qcow2 \
+                -device virtio-blk-pci,drive=hd0 \
                 -vnc :0 \
                 -display none \
                 -netdev user,id=net0 \
@@ -368,7 +387,8 @@ jobs:
                 -cpu host \
                 -smp ${VCPUS} \
                 -m ${RAM}G \
-                -hda "$DISK_PATH" \
+                -drive if=none,id=hd0,file="$DISK_PATH",format=qcow2 \
+                -device virtio-blk-pci,drive=hd0 \
                 -boot c \
                 -vnc :0 \
                 -display none \
@@ -429,8 +449,6 @@ jobs:
 
       - name: Connection Information and Keep Alive
         run: |
-          echo "Thanks to MR.English2008 for this perfect work"
-          echo
           echo "=== CONNECTION INFORMATION ==="
           echo "RDP Username: ${USERNAME}"
           echo "RDP Password: ${PASSWORD}"
@@ -459,13 +477,6 @@ jobs:
             fi
           fi
           echo
-          echo "NOTE: if you connect with RDP or VNC you have to click on Connect_VNC.sh to open the qemu VM"
-          echo
-          echo "NOTE: if you did connect with RDP or NoMachine and open Connect_VNC.sh you will not be able to connect to VNC unless you disconnect from RDP or NoMachine"
-          echo
-          echo "NOTE: to disconnect type F8 from client keyboard a menu will appear click on Disconnect then you will be able to connect with VNC viewer again"
-          echo
-          echo "Have fun "
           RUNTIME="${{ github.event.inputs.runtime }}"
           echo "Keeping the session alive for ${RUNTIME} minutes..."
           sleep $((RUNTIME * 60))
