@@ -1,4 +1,4 @@
-name: Qemu-Vortax V 2.1
+name: Qemu-Vortax (Tailscale RDP only)
 
 on:
   workflow_dispatch:
@@ -23,14 +23,6 @@ on:
         description: 'Runtime duration in minutes (default 350)'
         required: false
         default: '350'
-      connection_method:
-        description: 'Choose connection method: tailscale or ngrok'
-        required: true
-        default: 'tailscale'
-      connection_program:
-        description: 'Select program (RDP, VNC, NoMachine)'
-        required: true
-        default: 'VNC'
       bios_mode:
         description: 'Choose firmware mode: UEFI or BIOS (default UEFI)'
         required: true
@@ -47,7 +39,6 @@ jobs:
       USERNAME: runner
       PASSWORD: runner
       TAILSCALE_AUTHKEY: ${{ secrets.TAILSCALE_AUTHKEY }}
-      NGROK_AUTH: ${{ secrets.NGROK_AUTH }}
       FINAL_SOURCE_URL: ''
       RUNNER_TEMP: /mnt/tmp
       ACTIONS_RUNNER_CACHE: /mnt/cache
@@ -62,53 +53,39 @@ jobs:
           sudo mkdir -p /mnt/tmp /mnt/cache
           sudo chmod -R 777 /mnt/tmp /mnt/cache
 
-      - name: Setup Connection (Tailscale or Ngrok)
+      - name: Setup Tailscale (Tailscale + set RDP connection)
         run: |
-          METHOD="${{ github.event.inputs.connection_method }}"
-          if [ "$METHOD" = "tailscale" ]; then
-            curl -fsSL https://tailscale.com/install.sh | sudo sh
-            sudo tailscale up --authkey "${TAILSCALE_AUTHKEY}" --hostname "gh-xfce-vm-${{ github.run_id }}" --accept-routes --accept-dns=false
-            TS_IP=$(sudo tailscale ip -4 | head -n1)
-            echo "CONNECTION_IP=$TS_IP" >> $GITHUB_ENV
-            echo "CONNECTION_TYPE=Tailscale" >> $GITHUB_ENV
-          elif [ "$METHOD" = "ngrok" ]; then
-            wget -q -O ngrok.zip https://bin.equinox.io/c/bNyj1mQVY4c/ngrok-v3-stable-linux-amd64.zip
-            unzip -q ngrok.zip
-            sudo mv ngrok /usr/local/bin/
-            ngrok config add-authtoken "${NGROK_AUTH}"
-            echo "CONNECTION_TYPE=Ngrok" >> $GITHUB_ENV
-          else
-            echo "::error::Invalid connection method. Choose tailscale or ngrok."
-            exit 1
-          fi
+          curl -fsSL https://tailscale.com/install.sh | sudo sh
+          sudo tailscale up --authkey "${TAILSCALE_AUTHKEY}" --hostname "gh-xfce-vm-${{ github.run_id }}" --accept-routes --accept-dns=false
+          TS_IP=$(sudo tailscale ip -4 | head -n1)
+          echo "CONNECTION_IP=$TS_IP" >> $GITHUB_ENV
+          echo "CONNECTION_TYPE=Tailscale" >> $GITHUB_ENV
 
-      - name: Install XFCE + RDP + NoMachine
+      - name: Install XFCE + xrdp + NoMachine (NoMachine retained but optional)
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y jq tigervnc-viewer wmctrl wget internetarchive
+          sudo apt-get install -y jq wget qemu-utils
           wget -q https://web9001.nomachine.com/download/9.2/Linux/nomachine_9.2.18_3_amd64.deb -O nomachine.deb
           sudo dpkg -i nomachine.deb || sudo apt-get -f install -y
           rm nomachine.deb
-          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xfce4 xfce4-goodies xorg dbus-x11 xrdp qemu-utils
+          sudo DEBIAN_FRONTEND=noninteractive apt-get install -y -qq xfce4 xfce4-goodies xorg dbus-x11 xrdp qemu-system-x86 ovmf novnc websockify unzip p7zip-full unrar-free tar python3-pip
           echo "startxfce4" | sudo tee /home/${USERNAME}/.xsession
           sudo chown ${USERNAME}:${USERNAME} /home/${USERNAME}/.xsession
           echo "exec startxfce4" | sudo tee /etc/skel/.xsession
           echo "startxfce4" | sudo tee /etc/skel/.xinitrc
-          sudo ufw allow 4000/tcp
-          sudo ufw allow 4011:4999/tcp
-          sudo ufw allow 5900/tcp
-          sudo ufw allow 3389/tcp
+          # Only open RDP port (other ports removed since Tailscale handles routing)
+          sudo ufw allow 3389/tcp || true
           sudo ufw --force enable || true
           sudo systemctl enable --now xrdp
           sudo systemctl restart xrdp
 
-      - name: Install QEMU, OVMF, and components
+      - name: Install QEMU helpers and badown
         run: |
           sudo apt-get update -qq
-          sudo apt-get install -y -qq qemu-system-x86 ovmf novnc websockify wget curl unzip p7zip-full unrar-free tar python3-pip
-          pip install internetarchive
-          git clone https://github.com/stck-lzm/badown ~/badown
-          chmod +x ~/badown/badown
+          sudo apt-get install -y -qq git curl wget
+          pip install internetarchive --quiet || true
+          git clone https://github.com/stck-lzm/badown ~/badown || true
+          chmod +x ~/badown/badown || true
 
       - name: Determine source URL
         id: determine_url
@@ -159,8 +136,8 @@ jobs:
           echo "RAM=$RAM" >> $GITHUB_ENV
           echo "DISK=$DISK" >> $GITHUB_ENV
           echo "VCPUS=$VCPUS" >> $GITHUB_ENV
-          
-      - name: Prepare files and disks
+
+      - name: Prepare files and disks (download & validate)
         run: |
           set -euo pipefail
           MODE="${{ github.event.inputs.boot_mode }}"
@@ -174,14 +151,12 @@ jobs:
           sudo mkdir -p "$TEMP_PATH"
           sudo chmod 777 "$TEMP_PATH"
 
-          # Handle Internet Archive direct downloads
+          sudo rm -f .badown.tmp || true
+
           if [[ "$SRC" == *"archive.org/download/"* ]]; then
-            echo "Detected Internet Archive source..."
             ITEM=$(basename "$(dirname "$SRC")")
             FILE=$(basename "$SRC")
-            CMD="ia download $ITEM $FILE"
-            echo "Downloading using: $CMD"
-            eval "$CMD"
+            ia download "$ITEM" "$FILE"
             FOUND_FILE=$(find . -type f -name "$FILE" | head -n1)
             if [ -f "$FOUND_FILE" ]; then
               sudo mv "$FOUND_FILE" "$FILE_PATH"
@@ -190,18 +165,12 @@ jobs:
               exit 1
             fi
 
-          # Use robust badown runner for mediafire/mega
           elif [[ "$SRC" == *"mediafire.com"* || "$SRC" == *"mega.nz"* ]]; then
-            echo "Using badown to download from: $SRC"
             cd ~/badown || { echo "::error::can't cd to ~/badown"; exit 1; }
-
             OUTLOG="/tmp/badown_download.log"
             : > "$OUTLOG"
-
-            # Run badown with line buffering and tee to a logfile
             sudo stdbuf -oL ./badown "$SRC" 2>&1 | tee "$OUTLOG" &
             BADOWN_PID=$!
-
             last_progress=""
             while kill -0 $BADOWN_PID 2>/dev/null; do
               new_progress=$(grep -Eo '[0-9]{1,3}%' "$OUTLOG" | tail -n1 || true)
@@ -216,34 +185,29 @@ jobs:
 
             wait $BADOWN_PID
             BADOWN_EXIT=$?
-            if [ $BADOWN_EXIT -ne 0 ]; then
-              echo "::error::badown exited with status $BADOWN_EXIT"
-              tail -n 200 "$OUTLOG" || true
-              exit 1
-            fi
 
-            # Find most recent downloaded file anywhere under ~/badown
-            DOWNLOADED=$(find . -type f ! -name 'badown' ! -name '*.sh' ! -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
-            if [[ -z "$DOWNLOADED" ]]; then
-              DOWNLOADED=$(ls -1t 2>/dev/null | grep -v -E 'badown|\.sh|\.log' | head -n1 || true)
-            fi
-
-            if [[ -z "$DOWNLOADED" ]]; then
-              echo "::error::No downloaded file found in ~/badown after badown finished"
+            FOUND_FILE=$(find . -type f ! -name 'badown' ! -name '*.sh' ! -name '*.log' -printf '%T@ %p\n' 2>/dev/null | sort -n | tail -n1 | cut -d' ' -f2- || true)
+            if [[ -n "$FOUND_FILE" ]]; then
+              FOUND_SIZE=$(stat -c%s "$FOUND_FILE" 2>/dev/null || echo 0)
+              if [[ "$FOUND_SIZE" -gt 1024 ]]; then
+                sudo mv "$FOUND_FILE" "$FILE_PATH"
+              else
+                echo "::error::Found file but it's too small: $FOUND_FILE ($FOUND_SIZE bytes)."
+                tail -n 200 "$OUTLOG" || true
+                exit 1
+              fi
+            else
+              echo "::error::badown exited with code $BADOWN_EXIT and no downloaded file was found"
               tail -n 300 "$OUTLOG" || true
               exit 1
             fi
 
-            echo "Found downloaded file: $DOWNLOADED (moving to $FILE_PATH)"
-            sudo mv "$DOWNLOADED" "$FILE_PATH"
+            sudo rm -f .badown.tmp || true
 
-          # Fallback to wget for other sources
           else
-            echo "Downloading system file via wget..."
             sudo wget -q --user-agent="Mozilla/5.0" --trust-server-names --content-disposition -O "$FILE_PATH" "$SRC"
           fi
 
-          # Post-download validation
           if [ ! -f "$FILE_PATH" ]; then
             echo "::error::Expected file not found at $FILE_PATH"
             exit 1
@@ -258,41 +222,25 @@ jobs:
           MIME=$(file -b --mime-type "$FILE_PATH" || true)
           echo "Detected mime/type: $MIME for $FILE_PATH"
 
-          # If ISO found and user chose ISO mode -> keep iso and create qcow2 disk
           if [[ "$MIME" == *"iso"* && "$MODE" == "iso" ]]; then
-            echo "ISO detected; moving to home and creating qcow2 container for VM disk."
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
             sudo qemu-img create -f qcow2 "$MNT_PATH/${VM}.qcow2" "${DISK}G"
-
-          # If ISO but user requested qcow2: keep the ISO and create qcow2 disk (same behavior as before)
           elif [[ "$MIME" == *"iso"* && "$MODE" == "qcow2" ]]; then
-            echo "::warning::ISO provided but qcow2 mode requested. Keeping ISO at home and creating qcow2 container for VM disk."
             sudo mv "$FILE_PATH" "$HOME_PATH/${VM}.iso"
             sudo qemu-img create -f qcow2 "$MNT_PATH/${VM}.qcow2" "${DISK}G"
-
-          # If qcow2 already, move into place
           elif file "$FILE_PATH" | grep -qi 'qcow'; then
-            echo "qcow2 image detected; moving to $MNT_PATH/${VM}.qcow2"
             sudo mv "$FILE_PATH" "$MNT_PATH/${VM}.qcow2"
-
-          # If looks like raw/disk image -> convert to qcow2
           elif file "$FILE_PATH" | grep -Ei 'raw|disk image|x-raw|filesystem' >/dev/null 2>&1; then
-            echo "Raw/disk image detected; converting to qcow2..."
             sudo qemu-img convert -f raw -O qcow2 "$FILE_PATH" "$MNT_PATH/${VM}.qcow2" || { echo "::error::qemu-img convert failed"; exit 1; }
-
-          # Otherwise, assume it's a qcow2 target (move as fallback) and let validations detect issues
           else
-            echo "Unknown type, moving file to $MNT_PATH/${VM}.qcow2 and will validate."
             sudo mv "$FILE_PATH" "$MNT_PATH/${VM}.qcow2"
           fi
 
-          # Final sanity check for disk
           if [ ! -f "$MNT_PATH/${VM}.qcow2" ]; then
             echo "::error::Final VM disk not present at $MNT_PATH/${VM}.qcow2"
             ls -l "$MNT_PATH" || true
             exit 1
           fi
-          echo "Final disk ready: $MNT_PATH/${VM}.qcow2"
           file -k "$MNT_PATH/${VM}.qcow2" || true
           stat -c "%n %s %F" "$MNT_PATH/${VM}.qcow2" || true
 
@@ -315,13 +263,11 @@ jobs:
           wget -q https://gitlab.com/MR.English2008/qemu-pre-build-ovfm.fd-files/-/raw/main/OVMF_VARS.fd -O OVMF_VARS.fd
           CODE_PATH=./OVMF_CODE.fd
           VARS_PATH=./OVMF_VARS.fd
-          echo "downloaded from gitlab new links"
 
           if [ ! -f "$DISK_PATH" ]; then
             sudo qemu-img create -f qcow2 "$DISK_PATH" "${DISK}G" || true
           fi
 
-          # UEFI branch
           if [ "$BIOS_MODE" = "UEFI" ]; then
             if [ -f "$ISO_PATH" ]; then
               sudo qemu-system-x86_64 \
@@ -361,8 +307,6 @@ jobs:
                 -device usb-tablet,bus=ehci.0 \
                 -name "$VM" &
             fi
-
-          # BIOS branch
           else
             if [ -f "$ISO_PATH" ]; then
               sudo qemu-system-x86_64 \
@@ -401,83 +345,18 @@ jobs:
           fi
           echo "VM started successfully."
 
-      - name: Create desktop VNC launcher
-        run: |
-          DESKTOP_PATH="/home/${USERNAME}/Desktop"
-          SCRIPT_PATH="${DESKTOP_PATH}/Connect_VNC.sh"
-          mkdir -p "$DESKTOP_PATH"
-          cat <<EOF > "$SCRIPT_PATH"
-          vncviewer ${{ env.CONNECTION_IP }}:5900 -FullScreen -MenuKey F8 &
-          sleep 3 && wmctrl -r "VNC Viewer" -b add,above
-          EOF
-          chmod +x "$SCRIPT_PATH"
-          chown ${USERNAME}:${USERNAME} "$SCRIPT_PATH"
-          echo "Desktop launcher created at: $SCRIPT_PATH"
-
-      - name: Expose selected port with Ngrok
-        if: ${{ github.event.inputs.connection_method == 'ngrok' }}
-        run: |
-          echo "Starting Ngrok tunnel for selected connection method..."
-          if [ "${{ github.event.inputs.connection_program }}" = "RDP" ]; then
-            nohup ngrok tcp 3389 --region=eu > ngrok_rdp.log 2>&1 &
-          elif [ "${{ github.event.inputs.connection_program }}" = "VNC" ]; then
-            nohup ngrok tcp 5900 --region=eu > ngrok_vnc.log 2>&1 &
-          elif [ "${{ github.event.inputs.connection_program }}" = "NoMachine" ]; then
-            nohup ngrok tcp 4000 --region=eu > ngrok_nx.log 2>&1 &
-          else
-            echo "::error::Invalid connection_program. Choose RDP, VNC, or NoMachine."
-            exit 1
-          fi
-          sleep 10
-          curl --silent http://127.0.0.1:4040/api/tunnels > tunnels.json
-          RDP_URL=$(jq -r '.tunnels[] | select(.config.addr=="localhost:3389") | .public_url' tunnels.json)
-          VNC_URL=$(jq -r '.tunnels[] | select(.config.addr=="localhost:5900") | .public_url' tunnels.json)
-          NX_URL=$(jq -r '.tunnels[] | select(.config.addr=="localhost:4000") | .public_url' tunnels.json)
-          echo "RDP_URL=$RDP_URL" >> $GITHUB_ENV
-          echo "VNC_URL=$VNC_URL" >> $GITHUB_ENV
-          echo "NX_URL=$NX_URL" >> $GITHUB_ENV
-          if [ "${{ github.event.inputs.connection_program }}" = "RDP" ]; then
-            echo "RDP: $RDP_URL"
-            echo "CONNECTION_IP=$RDP_URL" >> $GITHUB_ENV
-          elif [ "${{ github.event.inputs.connection_program }}" = "VNC" ]; then
-            echo "VNC: $VNC_URL"
-            echo "CONNECTION_IP=$VNC_URL" >> $GITHUB_ENV
-          elif [ "${{ github.event.inputs.connection_program }}" = "NoMachine" ]; then
-            echo "NoMachine: $NX_URL"
-            echo "CONNECTION_IP=$NX_URL" >> $GITHUB_ENV
-          fi
-
-      - name: Connection Information and Keep Alive
+      - name: Connection Information and Keep Alive (Tailscale RDP)
         run: |
           echo "=== CONNECTION INFORMATION ==="
           echo "RDP Username: ${USERNAME}"
           echo "RDP Password: ${PASSWORD}"
           echo
           echo "Connection Type: ${{ env.CONNECTION_TYPE }}"
-          echo "Program Selected: ${{ github.event.inputs.connection_program }}"
           echo
-          if [ "${{ env.CONNECTION_TYPE }}" = "Tailscale" ]; then
-            echo "Tailscale IP:"
-            sudo tailscale ip -4 || true
-            echo
-            if [ "${{ github.event.inputs.connection_program }}" = "RDP" ]; then
-              echo ">>> RDP Connection: ${{ env.CONNECTION_IP }}"
-            elif [ "${{ github.event.inputs.connection_program }}" = "VNC" ]; then
-              echo ">>> VNC Connection: ${{ env.CONNECTION_IP }}:5900"
-            elif [ "${{ github.event.inputs.connection_program }}" = "NoMachine" ]; then
-              echo ">>> NoMachine Connection: ${{ env.CONNECTION_IP }}:4000"
-            fi
-          else
-            if [ "${{ github.event.inputs.connection_program }}" = "RDP" ]; then
-              echo ">>> RDP (Ngrok): ${{ env.RDP_URL }}"
-            elif [ "${{ github.event.inputs.connection_program }}" = "VNC" ]; then
-              echo ">>> VNC (Ngrok): ${{ env.VNC_URL }}"
-            elif [ "${{ github.event.inputs.connection_program }}" = "NoMachine" ]; then
-              echo ">>> NoMachine (Ngrok): ${{ env.NX_URL }}"
-            fi
-          fi
+          echo ">>> RDP Connection: ${{ env.CONNECTION_IP }}:3389"
           echo
           RUNTIME="${{ github.event.inputs.runtime }}"
           echo "Keeping the session alive for ${RUNTIME} minutes..."
           sleep $((RUNTIME * 60))
           echo "Session ended after ${RUNTIME} minutes."
+```0
