@@ -1,18 +1,18 @@
 ---
 
-# Qemu-Vortax V1.5
+# Qemu-Vortax V1.8
 
-Run any operating system (ISO, QCOW2, or compressed archive) directly on **GitHub Actions** with full graphical access through **XFCE**, **RDP**, **VNC**, **NoMachine**, and **Tailscale**.
+Run any operating system (ISO, QCOW2, or compressed archive) directly on **GitHub Actions** with full graphical access through **RDP**, **VNC** and **NoMachine** Via **Tailscale** and **Ngrok**
 
 
 
-![Forks](https://img.shields.io/github/forks/qemuvortax/qemuvortax?style=plastic&logo=github&logoColor=white&color=00bfff)![Tag](https://img.shields.io/github/v/tag/qemuvortax/qemuvortax?style=plastic&logo=github&logoColor=white&color=00bfff)
+![Forks](https://img.shields.io/github/forks/qemuvortax/qemuvortax?style=plastic&logo=github&logoColor=white&color=00bfff)!       [Tag](https://img.shields.io/github/v/tag/qemuvortax/qemuvortax?style=plastic&logo=github&logoColor=white&color=00bfff)
 
 ---
 
 ## ⚙️ Overview
 
-**Qemu-Vortax V1.5** is an educational and experimental workflow that boots complete virtual machines inside GitHub Actions using QEMU + XFCE.  
+**Qemu-Vortax V1.8** is an educational and experimental workflow that boots complete virtual machines inside GitHub Actions using QEMU + XFCE.  
 You can run Linux distributions, Android builds, or pre-made cloud images (ISO/QCOW2) from any source.
 
 > 🧠 For educational use only.  
@@ -29,11 +29,11 @@ You can run Linux distributions, Android builds, or pre-made cloud images (ISO/Q
 - 📦 Automatic decompression for archives  
 - 🔁 Preset OS templates ready to boot  
 - 🧠 Auto-detects ISO vs QCOW2 modes  
+- 👾 Fixable choice between UEFI and BIOS
 - ⏱️ Runtime limiter to control session length  
 - 🌐 Cross-device access (Windows, macOS, Linux, Android)  
 - 💾 Temporary QCOW2 storage for realistic disk simulation  
-- ⚡ Boots in under 4–5 minutes depending on image size  
-- 🔄 Fully integrates all previous releases (V1.3, V1.4) as legacy templates  
+- ⚡ Boots in under 4–5 minutes depending on image size    
 
 ---
 
@@ -54,7 +54,7 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 
 ### 3. Run the workflow  
 1. Open the **Actions** tab.  
-2. Select **Qemu-Vortax V1.5**.  
+2. Select **Qemu-Vortax V1.8**.  
 3. Click **Run workflow** and fill the inputs.
 
 ---
@@ -82,23 +82,23 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 
 | System | Boot Type | Description | Screenshot |
 |--------|------------|--------------|-------------|
-| `ubuntu` | ISO | Classic Ubuntu desktop with XFCE, stable and lightweight. | ![Ubuntu](assets/ubuntu.png) |
-| `mint` | ISO | Linux Mint XFCE edition for smooth and modern experience. | ![Mint](assets/mint.png) |
-| `kali` | ISO | Kali Linux for penetration testing and ethical hacking labs. | ![Kali](assets/kali.png) |
-| `pear` | ISO | Pear Linux, macOS-style Ubuntu derivative focused on elegance and simplicity. | ![Pear](assets/pear.png) |
-| `deepin` | ISO | Deepin Linux with an elegant UI and strong customization. | ![Deepin](assets/deepin.png) |
-| `popos` | ISO | Pop!_OS optimized for developers and creators. | ![PopOS](assets/popos.png) |
 | `bazite` | ISO | Minimal distro focused on performance and clean design. | ![Bazite](assets/bazite.png) |
-| `neon` | ISO | KDE Neon with the latest Plasma environment. | ![Neon](assets/neon.png) |
-| `bliss_gapps` | ISO | Android-based OS with Google Apps pre-installed. | ![BlissGapps](assets/bliss_gapps.png) |
-| `garuda_mokka` | ISO | Garuda Linux Mokka edition for gaming and speed. | ![Garuda](assets/garuda.png) |
-| `manjaro` | ISO | Manjaro GNOME 25.0.10, a fast and user-friendly Arch-based distribution. | ![Manjaro](assets/manjaro.png) |
-| `cutefish` | ISO | CutefishOS 22.04, Ubuntu-based system with a clean macOS-like interface. | ![Cutefish](assets/cutefish.png) |
-| `debian_qcow2` | QCOW2 | Debian 12 Bookworm cloud image preconfigured for QEMU. | ![Debian](assets/debian_qcow2.png) |
+| `bliss` | ISO/QCOW2 | Android-based OS with Google Apps pre-installed. | ![Bliss](assets/bliss.png) |
 | `centos_qcow2` | QCOW2 | CentOS Stream 10 GenericCloud image for stable enterprise environments. | ![CentOS](assets/centos_qcow2.png) |
-| `kali_qcow2` | QCOW2 | Kali Linux 2025.3 QEMU-ready build for penetration testing. | ![Kali](assets/kali.png) |
+| `cutefish` | ISO | CutefishOS 22.04, Ubuntu-based system with a clean macOS-like interface. | ![Cutefish](assets/cutefish.png) |
+| `deepin` | ISO/QCOW2 | Deepin Linux with an elegant UI and strong customization. | ![Deepin](assets/deepin.png) |
+| `garuda_mokka` | ISO | Garuda Linux Mokka edition for gaming and speed. | ![Garuda](assets/garuda.png) |
+| `kali` | ISO/QCOW2 | Kali Linux for penetration testing and ethical hacking labs. | ![Kali](assets/kali.png) |
+| `manjaro` | ISO | Manjaro GNOME 25.0.10, a fast and user-friendly Arch-based distribution. | ![Manjaro](assets/manjaro.png) |
+| `mint` | ISO/QCOW2 | Linux Mint XFCE edition for smooth and modern experience. | ![Mint](assets/mint.png) |
+| `neon` | ISO | KDE Neon with the latest Plasma environment. | ![Neon](assets/neon.png) |
+| `pear` | ISO | Pear Linux, macOS-style Ubuntu derivative focused on elegance and simplicity. | ![Pear](assets/pear.png) |
+| `pop_os` | ISO/QCOW2 | Pop!_OS optimized for developers and creators. | ![PopOS](assets/popos.png) |
+| `ubuntu` | ISO | Classic Ubuntu desktop with XFCE, stable and lightweight. | ![Ubuntu](assets/ubuntu.png) |
+| `win7` | QCOW2 | Windows 7 Professional with classic interface and broad software support. | ![Win7](assets/win7.png) |
+| `debian_qcow2` | QCOW2 | Debian 12 Bookworm cloud image preconfigured for QEMU. | ![Debian](assets/debian_qcow2.png) |
 
-> All previous releases (V1.3, V1.4) are included as legacy templates.
+> All previous releases (V1.3, V1.4, V1.5, V1.6, V1.7) are included as previous released.
 
 ---
 
@@ -108,7 +108,7 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 |------|----------|------|
 | RDP | `ip:3389` | Remote Desktop Client |
 | VNC | `ip:5900` | VNC Viewer / Remmina |
-| NoMachine | auto | Fast remote desktop |
+| NoMachine | `ip:4000` | Fast remote desktop |
 | Tailscale | secure | Private VPN-style access |
 | Ngrok | secure | Private tunnel forward access |
 
@@ -128,7 +128,7 @@ Go to **Settings → Secrets → Actions → New repository secret** and add the
 ## 🧠 Credits
 
 Developed by **Mohamed Ahmed Saad**  
-Project: **Qemu-Vortax V1.5**  
+Project: **Qemu-Vortax V1.8**  
 Goal: Simplify and accelerate virtual machine testing in the cloud.
 
 ---
